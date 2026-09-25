@@ -60,10 +60,11 @@ class SwinTransformer(nn.Module):
 
     @classmethod
     def instantiate_from_cfg(cls, cfg, domain_metadata):
-        if isinstance(cfg.model.window_size, ListConfig):
-            window_size = tuple(cfg.model.window_size)
+        ws = cfg.model.window_size
+        if isinstance(ws, (list, tuple, ListConfig)):
+            window_size = tuple(int(x) for x in ws)
         else:
-            window_size = (cfg.model.window_size, cfg.model.window_size)
+            window_size = (ws, ws)
         # if we have invariants, we need to add them to the input
         extra_inputs = len(cfg.data.invariants) if cfg.data.invariants else 0
         return cls(

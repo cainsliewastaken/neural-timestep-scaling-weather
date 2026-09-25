@@ -128,25 +128,97 @@ class Trainer:
             )
         self.build_and_run()
 
+    def _find_highest_iter_checkpoint(self):
+        """Return path to highest ``{ckpt_stem}_iter{N}.tar`` for this parallel rank, or None."""
+        ckpt_dir = os.path.join(self.exp_dir, "checkpoints")
+        if not os.path.isdir(ckpt_dir):
+            return None
+        # Parallel ranks rename "ckpt" -> "ckpt_tpN" / "ckpt_sp1X_sp2Y", etc.
+        stem = os.path.basename(self.modify_checkpoint_path("ckpt"))
+        prefix = f"{stem}_iter"
+        suffix = ".tar"
+        best_iter = None
+        best_path = None
+        for fname in os.listdir(ckpt_dir):
+            if not (fname.startswith(prefix) and fname.endswith(suffix)):
+                continue
+            iter_str = fname[len(prefix) : -len(suffix)]
+            if not iter_str.isdigit():
+                continue
+            it = int(iter_str)
+            if best_iter is None or it > best_iter:
+                best_iter = it
+                best_path = os.path.join(ckpt_dir, fname)
+        return best_path
+
+    def _assert_resume_config_matches(self):
+        """Ensure hyperparameters.yaml matches current config when resuming same run."""
+        prev_path = os.path.join(self.exp_dir, "hyperparameters.yaml")
+        if not os.path.isfile(prev_path):
+            return
+        prevcfg = OmegaConf.load(prev_path)
+        assert OmegaConf.to_container(
+            prevcfg, resolve=True
+        ) == OmegaConf.to_container(self.cfg, resolve=True), (
+            "Resuming run_name=%s, run_tag=%s failed: config saved to hyperparameters.yaml does not match current config"
+            % (self.cfg.run_name, self.cfg.run_tag)
+        )
+
     def setup_checkpoint_strategy(self):
         """resume a run, branch from a previous run, or finetune from a previous run"""
         self.checkpoint_path = os.path.join(
             self.exp_dir,
             "checkpoints/ckpt.tar",
         )
+        env_force = str(os.environ.get("LOAD_HIGHEST_CHECKPOINT", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        load_highest = env_force or bool(
+            OmegaConf.select(self.cfg, "train.load_highest_checkpoint", default=False)
+        )
+
+        # Job-chain resume: ignore branch_from/finetune_from and load highest iter ckpt.
+        if load_highest:
+            highest = self._find_highest_iter_checkpoint()
+            if highest is None:
+                latest = self.modify_checkpoint_path(self.checkpoint_path)
+                if os.path.isfile(latest):
+                    highest = latest
+            if highest is not None:
+                self._assert_resume_config_matches()
+                src = (
+                    "LOAD_HIGHEST_CHECKPOINT env"
+                    if env_force
+                    else "train.load_highest_checkpoint=true"
+                )
+                logging.info("%s; loading checkpoint %s" % (src, highest))
+                self.restore_checkpoint(
+                    checkpoint_path=highest,
+                    restore_optimizer=True,
+                    restore_scheduler=True,
+                    restore_dataset=True,
+                )
+            else:
+                src = (
+                    "LOAD_HIGHEST_CHECKPOINT env"
+                    if env_force
+                    else "train.load_highest_checkpoint=true"
+                )
+                logging.info(
+                    "%s but no checkpoints found in %s; starting from scratch"
+                    % (src, os.path.join(self.exp_dir, "checkpoints"))
+                )
+            return
+
         self.resuming = (
             True if os.path.isfile(self.checkpoint_path) and self.auto_resume else False
         )
 
         if self.resuming:
-            # Make sure the config matches if we are auto-resuming
-            prevcfg = OmegaConf.load(os.path.join(self.exp_dir, "hyperparameters.yaml"))
-            assert OmegaConf.to_container(
-                prevcfg, resolve=True
-            ) == OmegaConf.to_container(self.cfg, resolve=True), (
-                "Resuming run_name=%s, run_tag=%s failed: config saved to hyperparameters.yaml does not match current config"
-                % (self.cfg.run_name, self.cfg.run_tag)
-            )
+            self._assert_resume_config_matches()
             # resuming a run from a saved checkpoint (same name and tag)
             logging.info("Resuming checkpoint %s" % self.checkpoint_path)
             self.restore_checkpoint(
