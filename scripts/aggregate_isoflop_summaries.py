@@ -6,19 +6,24 @@ Forward (inference) 24h cost
   forward_24h_flops = forward_flops * train_final_time_hours / (dt_scale * base_dt_hours)
                     = total_inference_flops   (base_dt_hours == 1)
 
-Training epoch cost
--------------------
-Config metadata ``total_train_flops`` equals the cost of *one global batch*
-trained with a 24h-equivalent unroll:
+Training cost
+-------------
+Each optimizer step trains one global batch, each sample rolled out ``rollout_steps``
+(= ``train.num_rollout_steps``) and backpropagated through the whole rollout:
 
-  total_train_flops = forward_flops * 3 * batch_size * rollout_steps
-                    = forward_24h_flops * 3 * batch_size
+  train_flops_per_iteration = forward_flops * 3 * batch_size * rollout_steps
+                            = forward_24h_flops * 3 * batch_size
+
+Config metadata ``total_train_flops`` is the whole run:
+
+  total_train_flops = train_flops_per_iteration * max_iterations
 
 A full dataset epoch has ``iters_per_epoch = n_train_samples // batch_size``
 optimizer steps (see ``utils/trainer.py``), so:
 
-  train_epoch_flops = total_train_flops * iters_per_epoch
+  train_epoch_flops = train_flops_per_iteration * iters_per_epoch
                     ≈ forward_24h_flops * 3 * n_train_samples
+  epochs            = max_iterations * batch_size / n_train_samples
 
 ``n_train_samples`` defaults from ``--train-hours`` using the same border
 formula as the ERA5 loader:
@@ -40,9 +45,8 @@ ROOT = Path(__file__).resolve().parent.parent
 BATCH_SIZE = 16  # generator default used for all isoflop configs
 TRAIN_FACTOR = 3  # fwd + bwd ≈ 3× forward per training step (matches trainer.py)
 TEMPORAL_CONTEXT_WINDOW = 1
-NUM_ROLLOUT_STEPS = 1  # generator sets train.num_rollout_steps=1
 # Default: hourly ERA5 train years 1979–2016 (excl. valid 2017 + test 2018–2022).
-DEFAULT_TRAIN_HOURS = int(round(38 * 365.25 * 24))
+DEFAULT_TRAIN_HOURS = (38 * 365 + 10) * 24  # 38 years incl. 10 leap years
 
 SUMMARY_FIELDS = [
     "budget_label",
@@ -50,10 +54,14 @@ SUMMARY_FIELDS = [
     "dt_scale",
     "embed_dim",
     "depth",
+    "rollout_steps",
     "forward_24h_flops",
     "train_epoch_flops",
     "iters_per_epoch",
     "n_train_samples",
+    "max_iterations",
+    "total_train_flops",
+    "epochs",
     "yaml_file",
 ]
 
@@ -76,7 +84,7 @@ def _read_yaml_as_row(yaml_path: Path) -> dict:
         "rollout_budget": meta["rollout_budget"],
         "target_rollout_flops": meta["target_rollout_flops"],
         "train_final_time_hours": meta["train_final_time_hours"],
-        "total_train_steps": meta["total_train_steps"],
+        "max_iterations": meta["max_iterations"],
         "rollout_steps": meta["rollout_steps"],
         "total_train_flops": meta["total_train_flops"],
         "total_inference_flops": meta["total_inference_flops"],
@@ -98,9 +106,9 @@ def _load_dir(dir_path: Path) -> list[dict]:
     return rows
 
 
-def _n_train_samples(train_hours: int, dt_scale: float) -> int:
+def _n_train_samples(train_hours: int, dt_scale: float, rollout_steps: int) -> int:
     """Match era5hdf5.compute_total_samples for fixed train_hours timeline."""
-    margin = (TEMPORAL_CONTEXT_WINDOW + NUM_ROLLOUT_STEPS - 1) * dt_scale
+    margin = (TEMPORAL_CONTEXT_WINDOW + rollout_steps - 1) * dt_scale
     n = int(train_hours - margin)
     if n <= 0:
         raise ValueError(
@@ -120,25 +128,28 @@ def _verify_and_summarize(
     forward = float(row["forward_flops"])
     tfinal = float(row["train_final_time_hours"])
     steps = int(float(row["rollout_steps"]))
+    max_iterations = int(float(row["max_iterations"]))
     reported_infer = float(row["total_inference_flops"])
     reported_train = float(row["total_train_flops"])
     reported_budget = float(row["rollout_budget"])
 
-    expected_infer = forward * tfinal / dt
-    expected_train_one_batch = forward * TRAIN_FACTOR * batch_size * steps
+    expected_budget = forward * tfinal / dt
+    expected_infer = forward * steps
+    train_per_iter = forward * TRAIN_FACTOR * batch_size * steps
+    expected_train = train_per_iter * max_iterations
 
     def _rel(a: float, b: float) -> float:
         return abs(a - b) / max(abs(b), 1.0)
 
     errs = []
-    if _rel(reported_budget, expected_infer) > 1e-9:
-        errs.append(f"rollout_budget {reported_budget} != forward*T/dt {expected_infer}")
+    if _rel(reported_budget, expected_budget) > 1e-9:
+        errs.append(f"rollout_budget {reported_budget} != forward*T/dt {expected_budget}")
     if _rel(reported_infer, expected_infer) > 1e-9:
-        errs.append(f"total_inference_flops {reported_infer} != forward*T/dt {expected_infer}")
-    if _rel(reported_train, expected_train_one_batch) > 1e-9:
+        errs.append(f"total_inference_flops {reported_infer} != forward*steps {expected_infer}")
+    if _rel(reported_train, expected_train) > 1e-9:
         errs.append(
-            f"total_train_flops {reported_train} != forward*3*batch*steps "
-            f"{expected_train_one_batch}"
+            f"total_train_flops {reported_train} != forward*3*batch*steps*max_iterations "
+            f"{expected_train}"
         )
     if errs:
         raise ValueError(
@@ -146,14 +157,14 @@ def _verify_and_summarize(
             + "; ".join(errs)
         )
 
-    n_samples = _n_train_samples(train_hours, dt)
+    n_samples = _n_train_samples(train_hours, dt, steps)
     iters_per_epoch = n_samples // batch_size
     if iters_per_epoch < 1:
         raise ValueError(
             f"iters_per_epoch < 1 for n_samples={n_samples}, batch_size={batch_size}"
         )
-    # Scale the one-batch / 24h-unroll train cost up to a full data epoch.
-    train_epoch_flops = reported_train * iters_per_epoch
+    # Scale the one-batch / full-rollout train cost up to a full data epoch.
+    train_epoch_flops = train_per_iter * iters_per_epoch
 
     return {
         "budget_label": budget_label,
@@ -161,10 +172,14 @@ def _verify_and_summarize(
         "dt_scale": dt,
         "embed_dim": int(float(row["embed_dim"])),
         "depth": int(float(row["depth"])),
+        "rollout_steps": steps,
         "forward_24h_flops": reported_infer,
         "train_epoch_flops": train_epoch_flops,
         "iters_per_epoch": iters_per_epoch,
         "n_train_samples": n_samples,
+        "max_iterations": max_iterations,
+        "total_train_flops": reported_train,
+        "epochs": max_iterations * batch_size / n_samples,
         "yaml_file": row.get("yaml_file", ""),
     }
 

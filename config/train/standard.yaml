@@ -14,3 +14,5 @@ branch_from: null # use to specify path to a checkpoint you want to branch from
 load_highest_checkpoint: false
 temporal_context_window: 1
 num_rollout_steps: 1
+# recompute each rollout step in backward (saves activation memory for long rollouts)
+rollout_activation_checkpointing: false

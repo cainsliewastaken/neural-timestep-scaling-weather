@@ -8,3 +8,7 @@ num_heads: 16
 dropout: 0.
 mlp_ratio: 4
 coord_pos_embed: true
+# Time stepping (models/helpers.py TimeStepper)
+step_method: 'direct' # 'direct': x_{k+1} = net(x_k); 'euler': x_{k+1} = x_k + dt * tendency(net(x_k))
+time_unit_hours: 8.0 # hours per model time unit: min over channels of sigma_x / sigma_dxdt (upstream global_std; 1-2 h increments give 6.7-8.1 h, fastest q200-q300 and v), rounded to 8; dt = dt_scale * dt_hours / time_unit_hours
+tendency_stats: null # h5 with per-dt_scale increment stats (channel, dt_scales, temp_diff_mean, temp_diff_std); required for euler

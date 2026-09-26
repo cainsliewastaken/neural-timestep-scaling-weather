@@ -5,9 +5,18 @@ For each ``dt_scale`` in the sweep, search ``embed_dim`` (model width) so that
 
     target_rollout_flops ~= forward_flops * train_final_time_hours / (dt_scale * base_dt_hours)
 
-Rollout timesteps are ``train_final_time_hours / (dt_scale * base_dt_hours)``; the
-isoflop budget above is what ``--target-rollout-flops`` sets (e.g. 3e9 for a 24 h curve
+Each training sample is rolled out ``num_rollout_steps = train_final_time_hours /
+(dt_scale * base_dt_hours)`` steps and backpropagated through the whole rollout (one
+loss, one optimizer step per batch), like ``Loss_Multistep`` in the 1d/2d repos. The
+rollout budget above is what ``--target-rollout-flops`` sets (e.g. 3e9 for a 24 h curve
 at ``dt_scale=1`` when ``base_dt_hours=1``).
+
+Training length comes from a total training FLOP budget (``--total-train-flops``):
+
+    max_iterations = total_train_flops / (3 * forward_flops * num_rollout_steps * batch_size)
+
+where ``max_iterations`` is the total number of optimizer steps for the run (one per
+global batch) and 3 counts forward + backward.
 
 using ``FlopsCalculator`` (same formulas as training). PyTorch ``FlopCounterMode``
 and fvcore are optional fallbacks; both miss ``scaled_dot_product_attention``
@@ -19,14 +28,15 @@ and scales to the full ERA5 grid (720x1440). Analytical FLOPs scale exactly with
 area for this windowed Swin, so the reduced count grid is only needed for the
 slow pytorch/fvcore backends.
 
-All configs roll out to the same physical horizon. With the isoflop constraint above,
-each model gets the same total inference and training FLOP budget across ``dt_scale``.
+All configs roll out to the same physical horizon. With the constraints above, each
+model gets the same inference (rollout) and training FLOP budget across ``dt_scale``.
 
 Example
 -------
 python scripts/generate_isoflop_configs.py \\
     --budget-label 3e9 \\
     --target-rollout-flops 3e9 \\
+    --total-train-flops 1e18 \\
     --train-final-time-hours 24 \\
     --dt-scales 1 2 3 4 6 8 12 \\
     --depth 12
@@ -62,6 +72,9 @@ from flop_count_utils import (  # noqa: E402
     measure_forward_flops_pytorch,
     valid_embed_dim,
 )
+
+# ERA5 training years 1979-2016 (valid 2017, test 2018-2022): 38 years incl. 10 leap years.
+TRAIN_HOURS_1979_2016 = (38 * 365 + 10) * 24
 
 
 def _positive_float(value: str) -> float:
@@ -100,9 +113,10 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help=(
             "Physical rollout horizon in hours (same for every dt_scale). "
-            "optimizer.max_iterations = train_final_time / (dt_scale * base_dt_hours)."
+            "train.num_rollout_steps = train_final_time / (dt_scale * base_dt_hours)."
         ),
     )
+    add_rollout_training_args(p)
     p.add_argument(
         "--base-dt-hours",
         type=float,
@@ -162,6 +176,55 @@ def parse_args() -> argparse.Namespace:
                    help="Grid width for PyTorch FLOP counting (scaled to 1440 in output).")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args()
+
+
+def add_rollout_training_args(p: argparse.ArgumentParser) -> None:
+    """Training-budget and time-stepping options shared with generate_isoflop_configs_aspect."""
+    p.add_argument(
+        "--total-train-flops",
+        type=float,
+        required=True,
+        help=(
+            "Total training FLOP budget per run: optimizer.max_iterations = "
+            "total_train_flops / (3 * forward_flops * num_rollout_steps * batch_size)."
+        ),
+    )
+    p.add_argument(
+        "--train-hours",
+        type=int,
+        default=TRAIN_HOURS_1979_2016,
+        help="Hourly snapshots in the training years (reporting only: epochs = samples seen / train samples).",
+    )
+    p.add_argument(
+        "--step-method",
+        type=str,
+        default="euler",
+        choices=("euler", "direct"),
+        help="model.step_method for TimeStepper.",
+    )
+    p.add_argument(
+        "--tendency-stats",
+        type=str,
+        default="/registry/stats/tendency_stats_v1.0.h5",
+        help="model.tendency_stats (container path) used by the euler step.",
+    )
+    p.add_argument(
+        "--time-unit-hours",
+        type=float,
+        default=8.0,
+        help=(
+            "model.time_unit_hours: hours per model time unit (dt = dt_scale * base_dt / unit). "
+            "Default: first-order Taylor scale min_c sigma_x,c / sigma_dxdt,c in the model's "
+            "normalization (upstream global_std; 1-2 h increments give 6.7-8.1 h, fastest "
+            "q200-q300 and v), rounded to 8 h so 24 h = 3 units."
+        ),
+    )
+    p.add_argument(
+        "--rollout-checkpointing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="train.rollout_activation_checkpointing (recompute each rollout step in backward).",
+    )
 
 
 def _round_embed_dim(value: int, head_dim: int) -> int:
@@ -315,15 +378,75 @@ def search_sweep_value(
     return best
 
 
-def train_steps_for_dt(
+def rollout_steps_for_dt(
     train_final_time_hours: float,
     dt_scale: float,
     base_dt_hours: float,
 ) -> int:
-    """Optimizer steps so each dt_scale covers the same physical time window."""
+    """Rollout steps per training sample so each dt_scale covers the same physical horizon."""
     if train_final_time_hours <= 0 or dt_scale <= 0 or base_dt_hours <= 0:
         raise ValueError("train_final_time_hours, dt_scale, and base_dt_hours must be positive")
     return max(1, int(round(train_final_time_hours / (dt_scale * base_dt_hours))))
+
+
+def train_flops_per_iteration(forward_flops: float, rollout_steps: int, batch_size: int) -> float:
+    """One optimizer step: batch_size samples, each rolled out rollout_steps (x3 for fwd+bwd)."""
+    return 3 * forward_flops * rollout_steps * batch_size
+
+
+def max_iterations_for_budget(
+    total_train_flops: float,
+    forward_flops: float,
+    rollout_steps: int,
+    batch_size: int,
+) -> int:
+    """Total optimizer steps that spend total_train_flops."""
+    per_iter = train_flops_per_iteration(forward_flops, rollout_steps, batch_size)
+    return max(1, int(round(total_train_flops / per_iter)))
+
+
+def train_samples_for_dt(train_hours: int, dt_scale: float, rollout_steps: int) -> int:
+    """Training windows per epoch; matches era5hdf5.compute_total_samples (context window 1)."""
+    return max(1, int(train_hours - rollout_steps * dt_scale))
+
+
+def rollout_training_plan(
+    args: argparse.Namespace,
+    *,
+    dt_scale: float,
+    forward_flops: float,
+) -> dict:
+    """Rollout length, optimizer steps and FLOP bookkeeping for one config."""
+    rollout_steps = rollout_steps_for_dt(args.train_final_time_hours, dt_scale, args.base_dt_hours)
+    max_iterations = max_iterations_for_budget(
+        args.total_train_flops, forward_flops, rollout_steps, args.batch_size
+    )
+    per_iter = train_flops_per_iteration(forward_flops, rollout_steps, args.batch_size)
+    n_train_samples = train_samples_for_dt(args.train_hours, dt_scale, rollout_steps)
+    return {
+        "rollout_steps": rollout_steps,
+        "max_iterations": max_iterations,
+        "train_flops_per_iteration": per_iter,
+        "total_train_flops": per_iter * max_iterations,
+        "total_inference_flops": forward_flops * rollout_steps,
+        "n_train_samples": n_train_samples,
+        "epochs": max_iterations * args.batch_size / n_train_samples,
+    }
+
+
+def rollout_training_overrides(args: argparse.Namespace, plan: dict) -> dict:
+    """Hydra overrides for multistep rollout training with the chosen step method."""
+    overrides = {
+        "optimizer.max_iterations": plan["max_iterations"],
+        "train.temporal_context_window": 1,
+        "train.num_rollout_steps": plan["rollout_steps"],
+        "train.rollout_activation_checkpointing": args.rollout_checkpointing,
+        "model.step_method": args.step_method,
+        "model.time_unit_hours": args.time_unit_hours,
+    }
+    if args.step_method == "euler":
+        overrides["model.tendency_stats"] = args.tendency_stats
+    return overrides
 
 
 def rollout_budget(
@@ -353,15 +476,6 @@ def target_forward_flops(
     )
 
 
-def constant_total_train_flops(
-    target_rollout_flops: float,
-    batch_size: int,
-    base_dt_hours: float,
-) -> float:
-    """Total training FLOPs when rollout budget + fixed physical time hold."""
-    return target_rollout_flops * 3 * batch_size / base_dt_hours
-
-
 def constant_total_inference_flops(
     target_rollout_flops: float,
     base_dt_hours: float,
@@ -377,7 +491,7 @@ def resolve_reference_at_min_dt(
     grid_scale: float,
     cache: dict[tuple[int, int], float],
 ) -> tuple[int, int, float, float]:
-    """Search model size at min dt and return (embed, depth, forward_flops, per_step_train_flops)."""
+    """Search model size at min dt and return (embed, depth, forward_flops, train_flops_per_iteration)."""
     target_forward = target_forward_flops(
         args.target_rollout_flops,
         min_dt,
@@ -385,7 +499,7 @@ def resolve_reference_at_min_dt(
         grid_scale,
         args.base_dt_hours,
     )
-    ref_steps = train_steps_for_dt(args.train_final_time_hours, min_dt, args.base_dt_hours)
+    ref_steps = rollout_steps_for_dt(args.train_final_time_hours, min_dt, args.base_dt_hours)
     print(
         f"reference min_dt_scale={min_dt} rollout_steps={ref_steps} "
         f"target_forward(count_grid)={target_forward:.3e} ...",
@@ -408,8 +522,8 @@ def resolve_reference_at_min_dt(
     forward_flops = forward_flops_count_grid / grid_scale
     embed_dim = best if args.sweep_param == "embed_dim" else args.embed_dim
     depth = args.depth if args.sweep_param == "embed_dim" else best
-    per_step_train_flops = forward_flops * 3 * args.batch_size
-    return embed_dim, depth, forward_flops, per_step_train_flops
+    per_iter_train_flops = train_flops_per_iteration(forward_flops, ref_steps, args.batch_size)
+    return embed_dim, depth, forward_flops, per_iter_train_flops
 
 
 def format_run_tag(
@@ -431,18 +545,15 @@ def build_config_dict(
     train_window_size: tuple[int, int],
     forward_flops: float,
     forward_flops_count_grid: float,
-    max_iterations: int,
+    plan: dict,
     num_parameters: int,
     reference_dt_scale: float,
     train_final_time_hours: float,
-    total_inference_flops: float,
     expected_total_train_flops: float,
     expected_total_inference_flops: float,
 ) -> dict:
     num_heads = embed_dim // args.head_dim
     run_tag = format_run_tag(args.budget_label, dt_scale, embed_dim, depth)
-    per_step_train_flops = forward_flops * 3 * args.batch_size
-    total_train_flops = per_step_train_flops * max_iterations
     overrides = {
         "run_name": args.run_name,
         "run_tag": run_tag,
@@ -459,9 +570,8 @@ def build_config_dict(
         "parallelism.use_transformer_engine": True,
         "optimizer": "adamw",
         "optimizer.lr": args.lr,
-        "optimizer.max_iterations": max_iterations,
         "train.clip_grad_norm": 1.0,
-        "train.num_rollout_steps": 1,
+        **rollout_training_overrides(args, plan),
         "inference.time_horizon_in_hours": train_final_time_hours,
     }
     return {
@@ -474,8 +584,7 @@ def build_config_dict(
             "train_final_time_hours": train_final_time_hours,
             "base_dt_hours": args.base_dt_hours,
             "model_dt_hours": dt_scale * args.base_dt_hours,
-            "total_train_steps": max_iterations,
-            "rollout_steps": max_iterations,
+            "rollout_steps": plan["rollout_steps"],
             "reference_dt_scale": reference_dt_scale,
             "expected_total_train_flops": expected_total_train_flops,
             "expected_total_inference_flops": expected_total_inference_flops,
@@ -490,10 +599,12 @@ def build_config_dict(
             "rollout_budget": rollout_budget(
                 forward_flops, dt_scale, train_final_time_hours, args.base_dt_hours
             ),
-            "per_step_train_flops": per_step_train_flops,
-            "max_iterations": max_iterations,
-            "total_train_flops": total_train_flops,
-            "total_inference_flops": total_inference_flops,
+            "train_flops_per_iteration": plan["train_flops_per_iteration"],
+            "max_iterations": plan["max_iterations"],
+            "total_train_flops": plan["total_train_flops"],
+            "n_train_samples": plan["n_train_samples"],
+            "epochs": plan["epochs"],
+            "total_inference_flops": plan["total_inference_flops"],
             "num_parameters": num_parameters,
             "grid": [DEFAULT_H, DEFAULT_W],
             "flop_count_grid": [args.grid_h, args.grid_w],
@@ -522,12 +633,11 @@ def main() -> None:
     if args.hi < args.lo:
         raise ValueError(f"--max ({args.hi}) must be >= --min ({args.lo})")
 
+    if args.total_train_flops <= 0:
+        raise ValueError(f"total_train_flops must be positive, got {args.total_train_flops}")
+
     min_dt = min(args.dt_scales)
-    expected_train_flops = constant_total_train_flops(
-        args.target_rollout_flops,
-        args.batch_size,
-        args.base_dt_hours,
-    )
+    expected_train_flops = args.total_train_flops
     expected_inference_flops = constant_total_inference_flops(
         args.target_rollout_flops,
         args.base_dt_hours,
@@ -560,25 +670,25 @@ def main() -> None:
             flush=True,
         )
 
-    ref_embed, ref_depth, ref_forward_flops, ref_per_step_train_flops = resolve_reference_at_min_dt(
+    ref_embed, ref_depth, ref_forward_flops, ref_per_iter_train_flops = resolve_reference_at_min_dt(
         args, min_dt, window_size, grid_scale, cache
     )
-    ref_train_steps = train_steps_for_dt(args.train_final_time_hours, min_dt, args.base_dt_hours)
+    ref_rollout_steps = rollout_steps_for_dt(args.train_final_time_hours, min_dt, args.base_dt_hours)
 
     print(
         f"budget={args.budget_label} target_rollout_flops={args.target_rollout_flops:.3e} "
         f"train_final_time_hours={args.train_final_time_hours} base_dt_hours={args.base_dt_hours} "
         f"expected_total_train_flops={expected_train_flops:.3e} "
         f"expected_total_inference_flops={expected_inference_flops:.3e} "
-        f"reference min_dt={min_dt} ref_steps={ref_train_steps} ref_embed={ref_embed} "
+        f"reference min_dt={min_dt} ref_rollout_steps={ref_rollout_steps} ref_embed={ref_embed} "
         f"flop_backend={args.flop_backend} count_grid={args.grid_h}x{args.grid_w} "
         f"grid_scale={grid_scale:.4f} flop_device=cpu",
         flush=True,
     )
     header = (
         f"{'dt_scale':>10} {args.sweep_param:>12} {'forward_flops':>14} "
-        f"{'F*T/dt':>14} {'rollout_steps':>14} {'train_flops':>14} {'infer_flops':>14} "
-        f"{'params':>12} {'rel_err':>9}"
+        f"{'F*T/dt':>14} {'rollout_steps':>14} {'max_iters':>10} {'epochs':>8} "
+        f"{'train_flops':>14} {'infer_flops':>14} {'params':>12} {'rel_err':>9}"
     )
     print(header)
     print("-" * len(header))
@@ -593,9 +703,9 @@ def main() -> None:
             grid_scale,
             args.base_dt_hours,
         )
-        max_iterations = train_steps_for_dt(args.train_final_time_hours, dt_scale, args.base_dt_hours)
+        rollout_steps = rollout_steps_for_dt(args.train_final_time_hours, dt_scale, args.base_dt_hours)
         print(
-            f"searching dt_scale={dt_scale} rollout_steps={max_iterations} "
+            f"searching dt_scale={dt_scale} rollout_steps={rollout_steps} "
             f"target_forward(count_grid)={target_forward:.3e} ...",
             flush=True,
         )
@@ -620,9 +730,7 @@ def main() -> None:
             h=DEFAULT_H,
             w=DEFAULT_W,
         )
-        per_step_train_flops = forward_flops * 3 * args.batch_size
-        total_train_flops = per_step_train_flops * max_iterations
-        total_inference_flops = forward_flops * max_iterations
+        plan = rollout_training_plan(args, dt_scale=dt_scale, forward_flops=forward_flops)
         budget = rollout_budget(
             forward_flops, dt_scale, args.train_final_time_hours, args.base_dt_hours
         )
@@ -630,8 +738,9 @@ def main() -> None:
         rel = (budget - args.target_rollout_flops) / args.target_rollout_flops
         print(
             f"{dt_scale:>10g} {best:>12d} {forward_flops:>14.3e} "
-            f"{budget:>14.3e} {max_iterations:>14d} {total_train_flops:>14.3e} "
-            f"{total_inference_flops:>14.3e} {num_parameters:>12d} {rel:>+8.1%}",
+            f"{budget:>14.3e} {plan['rollout_steps']:>14d} {plan['max_iterations']:>10d} "
+            f"{plan['epochs']:>8.2f} {plan['total_train_flops']:>14.3e} "
+            f"{plan['total_inference_flops']:>14.3e} {num_parameters:>12d} {rel:>+8.1%}",
             flush=True,
         )
 
@@ -643,11 +752,10 @@ def main() -> None:
             train_window_size=train_window_size,
             forward_flops=forward_flops,
             forward_flops_count_grid=forward_flops_count_grid,
-            max_iterations=max_iterations,
+            plan=plan,
             num_parameters=num_parameters,
             reference_dt_scale=min_dt,
             train_final_time_hours=args.train_final_time_hours,
-            total_inference_flops=total_inference_flops,
             expected_total_train_flops=expected_train_flops,
             expected_total_inference_flops=expected_inference_flops,
         )
@@ -667,10 +775,11 @@ def main() -> None:
                 "target_rollout_flops": args.target_rollout_flops,
                 "train_final_time_hours": args.train_final_time_hours,
                 "model_dt_hours": dt_scale * args.base_dt_hours,
-                "total_train_steps": max_iterations,
-                "rollout_steps": max_iterations,
-                "total_train_flops": total_train_flops,
-                "total_inference_flops": total_inference_flops,
+                "rollout_steps": plan["rollout_steps"],
+                "max_iterations": plan["max_iterations"],
+                "epochs": plan["epochs"],
+                "total_train_flops": plan["total_train_flops"],
+                "total_inference_flops": plan["total_inference_flops"],
                 "expected_total_train_flops": expected_train_flops,
                 "expected_total_inference_flops": expected_inference_flops,
                 "reference_dt_scale": min_dt,
