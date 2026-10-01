@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 import time
 from pathlib import Path
@@ -765,7 +766,7 @@ def main() -> None:
             yaml.safe_dump(cfg, f, sort_keys=False)
         rows.append(
             {
-                "yaml_file": str(out_path.relative_to(ROOT)),
+                "yaml_file": os.path.relpath(out_path, ROOT),
                 "dt_scale": dt_scale,
                 "embed_dim": embed_dim,
                 "depth": depth,
@@ -797,7 +798,7 @@ def main() -> None:
     print("-" * len(header))
     print(f"Wrote {len(rows)} configs to {output_dir}")
     print(f"Manifest: {manifest}")
-    print(f"Submit with: bash submit_isoflop_sweep.sh -d {output_dir.relative_to(ROOT)}")
+    print(f"Submit with: bash submit_isoflop_sweep.sh -d {os.path.relpath(output_dir, ROOT)}")
 
 
 if __name__ == "__main__":
