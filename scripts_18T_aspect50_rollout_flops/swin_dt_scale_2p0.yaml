@@ -1,0 +1,74 @@
+schema_version: 1
+run_name: era5_isoflop
+run_tag: 18T_dt2p0_e352_d7
+metadata:
+  budget_label: 18T
+  target_rollout_flops: 18000000000000.0
+  train_final_time_hours: 24.0
+  base_dt_hours: 1.0
+  model_dt_hours: 2.0
+  rollout_steps: 12
+  reference_dt_scale: 1.0
+  expected_total_train_flops: 1.79712e+19
+  expected_total_inference_flops: 18000000000000.0
+  dt_scale: 2.0
+  embed_dim: 352
+  depth: 7
+  num_heads: 11
+  aspect_ratio: 50.285714285714285
+  min_aspect_ratio: 50.0
+  max_aspect_ratio: 50.0
+  target_aspect_ratio: 50.0
+  aspect_rel_err: 0.005714285714285694
+  flop_rel_err: 0.0490923872
+  patch_size: 4
+  window_size:
+  - 9
+  - 18
+  forward_flops: 1573638580800.0
+  forward_flops_count_grid: 98352411300.0
+  rollout_budget: 18883662969600.0
+  train_flops_per_iteration: 906415822540800.0
+  max_iterations: 19827
+  total_train_flops: 1.7971506513516442e+19
+  n_train_samples: 333096
+  epochs: 0.9523740903523309
+  total_inference_flops: 18883662969600.0
+  num_parameters: 11257664
+  grid:
+  - 720
+  - 1440
+  flop_count_grid:
+  - 180
+  - 360
+  flop_backend: analytical
+slurm:
+  nodes: 2
+  gpus_per_node: 4
+hydra_overrides:
+  run_name: era5_isoflop
+  run_tag: 18T_dt2p0_e352_d7
+  data.dt_scale: 2
+  data.batch_size: 16
+  model.embed_dim: 352
+  model.depth: 7
+  model.num_heads: 11
+  model.patch_size: 4
+  model.window_size:
+  - 9
+  - 18
+  parallelism.sp1: 1
+  parallelism.sp2: 2
+  parallelism.micro_batch_size: 1
+  parallelism.use_transformer_engine: true
+  optimizer: adamw
+  optimizer.lr: 0.0005
+  train.clip_grad_norm: 1.0
+  optimizer.max_iterations: 19827
+  train.temporal_context_window: 1
+  train.num_rollout_steps: 12
+  train.rollout_activation_checkpointing: true
+  model.step_method: euler
+  model.time_unit_hours: 8.0
+  model.tendency_stats: /registry/stats/tendency_stats_v1.0.h5
+  inference.time_horizon_in_hours: 24.0

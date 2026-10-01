@@ -642,7 +642,7 @@ def main() -> None:
         args.target_rollout_flops,
         args.base_dt_hours,
     )
-    output_dir = Path(args.output_dir) if args.output_dir else ROOT / f"scripts_{args.budget_label}_flops"
+    output_dir = ROOT / args.output_dir if args.output_dir else ROOT / f"scripts_{args.budget_label}_flops"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Flop counting builds a single-replica model (see make_domain_metadata defaults).

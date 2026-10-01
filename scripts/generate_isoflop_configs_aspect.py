@@ -773,7 +773,7 @@ def main() -> None:
         args.base_dt_hours,
     )
     output_dir = (
-        Path(args.output_dir)
+        ROOT / args.output_dir
         if args.output_dir
         else ROOT / f"scripts_{args.budget_label}_aspect_flops"
     )
