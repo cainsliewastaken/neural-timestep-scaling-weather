@@ -1,0 +1,83 @@
+schema_version: 1
+run_name: era5_isoflop
+run_tag: 6T_dt4p0_e320_d5
+metadata:
+  budget_label: 6T
+  target_rollout_flops: 6000000000000.0
+  train_final_time_hours: 24.0
+  base_dt_hours: 1.0
+  model_dt_hours: 4.0
+  rollout_steps: 6
+  reference_dt_scale: 1.0
+  expected_total_train_flops: 5.9904e+18
+  expected_total_inference_flops: 6000000000000.0
+  dt_scale: 4.0
+  embed_dim: 320
+  depth: 5
+  num_heads: 10
+  aspect_ratio: 64.0
+  min_aspect_ratio: 40.0
+  max_aspect_ratio: 100.0
+  target_aspect_ratio: 80.0
+  aspect_tolerance: 0.35
+  flop_tolerance: 0.05
+  monotonic_budgets:
+  - 3000000000000.0
+  - 6000000000000.0
+  - 9000000000000.0
+  - 12000000000000.0
+  - 15000000000000.0
+  - 18000000000000.0
+  aspect_rel_err: 0.0
+  flop_rel_err: -0.02952280000000016
+  patch_size: 4
+  window_size:
+  - 9
+  - 18
+  forward_flops: 970477199999.9999
+  forward_flops_count_grid: 60654824999.99999
+  rollout_budget: 5822863199999.999
+  train_flops_per_iteration: 279497433599999.94
+  max_iterations: 21433
+  total_train_flops: 5.990468494348799e+18
+  n_train_samples: 333096
+  epochs: 1.0295170161154743
+  total_inference_flops: 5822863199999.999
+  num_parameters: 6913920
+  grid:
+  - 720
+  - 1440
+  flop_count_grid:
+  - 180
+  - 360
+  flop_backend: analytical
+slurm:
+  nodes: 2
+  gpus_per_node: 4
+hydra_overrides:
+  run_name: era5_isoflop
+  run_tag: 6T_dt4p0_e320_d5
+  data.dt_scale: 4
+  data.batch_size: 16
+  model.embed_dim: 320
+  model.depth: 5
+  model.num_heads: 10
+  model.patch_size: 4
+  model.window_size:
+  - 9
+  - 18
+  parallelism.sp1: 1
+  parallelism.sp2: 2
+  parallelism.micro_batch_size: 1
+  parallelism.use_transformer_engine: true
+  optimizer: adamw
+  optimizer.lr: 0.0005
+  train.clip_grad_norm: 1.0
+  optimizer.max_iterations: 21433
+  train.temporal_context_window: 1
+  train.num_rollout_steps: 6
+  train.rollout_activation_checkpointing: true
+  model.step_method: euler
+  model.time_unit_hours: 8.0
+  model.tendency_stats: /registry/stats/tendency_stats_v1.0.h5
+  inference.time_horizon_in_hours: 24.0

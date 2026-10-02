@@ -165,8 +165,38 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "Optional preferred aspect inside the band (used only for "
-            "reporting aspect_rel_err). Defaults to the band midpoint."
+            "Preferred aspect inside the band. Reported as aspect_rel_err, and "
+            "with --aspect-tolerance it weights the shape search. Defaults to "
+            "the band midpoint."
+        ),
+    )
+    p.add_argument(
+        "--aspect-tolerance",
+        type=float,
+        default=None,
+        help=(
+            "Enable the weighted, monotonic shape search: each shape costs "
+            "(ln(F/target)/flop_tolerance)^2 + (ln(aspect/target_aspect)/aspect_tolerance)^2, "
+            "and shapes are chosen jointly over all per-step targets so that depth "
+            "and embed_dim never decrease as the target grows. Off by default "
+            "(nearest-FLOP shape per dt_scale)."
+        ),
+    )
+    p.add_argument(
+        "--flop-tolerance",
+        type=float,
+        default=0.05,
+        help="Relative FLOP error that costs as much as one aspect tolerance (weighted search).",
+    )
+    p.add_argument(
+        "--monotonic-budgets",
+        type=float,
+        nargs="+",
+        default=None,
+        help=(
+            "All --target-rollout-flops values in the sweep. The weighted search "
+            "solves jointly over every budget x dt_scale so separate calls pick "
+            "the same, globally monotonic shapes. Defaults to this call's budget only."
         ),
     )
     p.add_argument(
@@ -619,6 +649,116 @@ def target_forward_flops(
     )
 
 
+def search_weighted_monotonic(
+    args: argparse.Namespace,
+    window_size: tuple[int, int],
+    grid_scale: float,
+    cache: dict[tuple[int, int], float],
+) -> dict[float, SizeCandidate]:
+    """Pick one in-band shape per dt_scale, weighted toward the preferred aspect.
+
+    Per-step targets are collected over every budget in ``--monotonic-budgets`` (or
+    this call's budget) times every dt_scale, and sorted. A shape's cost at a
+    target is
+
+        (ln(F / target) / flop_tolerance)^2 + (ln(aspect / target_aspect) / aspect_tolerance)^2
+
+    and dynamic programming over the sorted targets minimizes the summed cost
+    subject to depth and embed_dim both being non-decreasing, so a larger model
+    never has fewer layers. Equal targets share one shape, so separate calls
+    for different budgets return the same shape for the same target.
+    """
+    budgets = args.monotonic_budgets or [args.target_rollout_flops]
+    if args.target_rollout_flops not in budgets:
+        budgets = [*budgets, args.target_rollout_flops]
+
+    def target_for(budget: float, dt_scale: float) -> float:
+        return target_forward_flops(
+            budget, dt_scale, args.train_final_time_hours, grid_scale, args.base_dt_hours
+        )
+
+    # Round so the same target from different budgets maps to one key.
+    targets = sorted({float(f"{target_for(b, dt):.9e}") for b in budgets for dt in args.dt_scales})
+    t_lo, t_hi = targets[0] / 2, targets[-1] * 2
+    embed_cap = min(
+        _round_embed_dim(
+            max(args.hi, int(math.ceil(args.max_aspect_ratio * args.max_depth))),
+            args.head_dim,
+        ),
+        _round_embed_dim(_EMBED_EXPAND_ABS_CAP, args.head_dim),
+    )
+
+    candidates: list[SizeCandidate] = []
+    for depth in range(args.min_depth, args.max_depth + 1):
+        for embed_dim in _aspect_band_embeds(
+            depth,
+            args.min_aspect_ratio,
+            args.max_aspect_ratio,
+            args.head_dim,
+            args.lo,
+            embed_cap,
+        ):
+            flops = _forward_flops_for(
+                args, embed_dim, depth, window_size, cache, label=f"weighted depth={depth}"
+            )
+            if flops > t_hi:
+                break  # FLOPs grow with embed_dim at fixed depth
+            if flops >= t_lo:
+                candidates.append(SizeCandidate(embed_dim, depth, flops))
+    if not candidates:
+        raise ValueError(
+            "weighted search: no in-band (embed_dim, depth) within 2x of the targets"
+        )
+    print(
+        f"  [weighted] {len(targets)} per-step target(s) from {len(budgets)} budget(s), "
+        f"{len(candidates)} in-band candidate shape(s), target_aspect={args.target_aspect_ratio:g} "
+        f"aspect_tolerance={args.aspect_tolerance:g} flop_tolerance={args.flop_tolerance:g}",
+        flush=True,
+    )
+
+    def cost(target: float, c: SizeCandidate) -> float:
+        flop_term = math.log(c.forward_flops_count_grid / target) / args.flop_tolerance
+        aspect_term = math.log(c.aspect_ratio / args.target_aspect_ratio) / args.aspect_tolerance
+        return flop_term**2 + aspect_term**2
+
+    # best[i][c] = (min summed cost of targets[:i+1] ending in c, predecessor shape)
+    best: list[dict[SizeCandidate, tuple[float, SizeCandidate | None]]] = []
+    for i, target in enumerate(targets):
+        layer: dict[SizeCandidate, tuple[float, SizeCandidate | None]] = {}
+        for c in candidates:
+            if i == 0:
+                layer[c] = (cost(target, c), None)
+                continue
+            prev = [
+                (v[0], p)
+                for p, v in best[i - 1].items()
+                if p.depth <= c.depth and p.embed_dim <= c.embed_dim
+            ]
+            if prev:
+                prev_cost, prev_shape = min(prev, key=lambda x: x[0])
+                layer[c] = (cost(target, c) + prev_cost, prev_shape)
+        best.append(layer)
+
+    shape = min(best[-1], key=lambda c: best[-1][c][0])
+    chosen = {targets[-1]: shape}
+    for i in range(len(targets) - 1, 0, -1):
+        shape = best[i][shape][1]
+        chosen[targets[i - 1]] = shape
+
+    for t in targets:
+        c = chosen[t]
+        print(
+            f"  [weighted] target_forward(count_grid)={t:.3e} -> embed_dim={c.embed_dim} "
+            f"depth={c.depth} aspect={c.aspect_ratio:.2f} "
+            f"flop_err={c.forward_flops_count_grid / t - 1:+.1%}",
+            flush=True,
+        )
+    return {
+        dt: chosen[float(f"{target_for(args.target_rollout_flops, dt):.9e}")]
+        for dt in args.dt_scales
+    }
+
+
 def constant_total_inference_flops(
     target_rollout_flops: float,
     base_dt_hours: float,
@@ -700,6 +840,9 @@ def build_config_dict(
             "min_aspect_ratio": args.min_aspect_ratio,
             "max_aspect_ratio": args.max_aspect_ratio,
             "target_aspect_ratio": args.target_aspect_ratio,
+            "aspect_tolerance": args.aspect_tolerance,
+            "flop_tolerance": args.flop_tolerance if args.aspect_tolerance is not None else None,
+            "monotonic_budgets": args.monotonic_budgets,
             "aspect_rel_err": aspect_rel_err,
             "flop_rel_err": flop_rel_err,
             "patch_size": args.patch_size,
@@ -763,6 +906,10 @@ def main() -> None:
         raise ValueError(
             f"--target-aspect-ratio must be positive, got {args.target_aspect_ratio}"
         )
+    if args.aspect_tolerance is not None and args.aspect_tolerance <= 0:
+        raise ValueError(f"--aspect-tolerance must be positive, got {args.aspect_tolerance}")
+    if args.flop_tolerance <= 0:
+        raise ValueError(f"--flop-tolerance must be positive, got {args.flop_tolerance}")
 
     if args.total_train_flops <= 0:
         raise ValueError(f"total_train_flops must be positive, got {args.total_train_flops}")
@@ -823,6 +970,12 @@ def main() -> None:
         f"{'train_flops':>14} {'infer_flops':>14} {'params':>12} "
         f"{'flop_err':>9} {'asp_err':>9}"
     )
+    weighted_shapes = (
+        search_weighted_monotonic(args, window_size, grid_scale, cache)
+        if args.aspect_tolerance is not None
+        else None
+    )
+
     print(header)
     print("-" * len(header))
 
@@ -841,13 +994,16 @@ def main() -> None:
             f"target_forward(count_grid)={target_forward:.3e} ...",
             flush=True,
         )
-        best = search_best_size(
-            args,
-            target_forward,
-            window_size,
-            cache,
-            label=f"dt_scale={dt_scale}",
-        )
+        if weighted_shapes is not None:
+            best = weighted_shapes[dt_scale]
+        else:
+            best = search_best_size(
+                args,
+                target_forward,
+                window_size,
+                cache,
+                label=f"dt_scale={dt_scale}",
+            )
         if best is None:
             print(
                 f"{dt_scale:>10g} {'—':>10} {'—':>6} {'—':>8} "
