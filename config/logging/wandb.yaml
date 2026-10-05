@@ -1,6 +1,6 @@
 # Weights & Biases logging
 log_to_wandb: true
 log_to_screen: true
-entity: 'scaling-transformers'
+entity: 'cainslie-univeristy-of-california-santa-cruz'
 project: 'era5'
 project_inference: 'era5-eval'
