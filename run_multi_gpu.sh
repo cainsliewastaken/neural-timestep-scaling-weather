@@ -24,6 +24,9 @@ export MASTER_PORT=29500
 export OMP_NUM_THREADS=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+# As upstream submit_batch.sh (the GPU order reversal is set inside the srun step below).
+export TORCH_CPP_LOG_LEVEL=ERROR
+export WANDB_START_METHOD="thread"
 export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-${SCRIPT_DIR}/wandb_cache}"
 mkdir -p "${WANDB_CACHE_DIR}"
 
@@ -54,6 +57,9 @@ srun --ntasks-per-node="${SLURM_GPUS_PER_NODE}" --gpus-per-node="${SLURM_GPUS_PE
   -V "${DATAROOT}:/data;${OUTPUT}:/expts;${REGISTRY}:/registry" \
   bash -lc "
     export HDF5_USE_FILE_LOCKING=FALSE
+    # Slurm resets CUDA_VISIBLE_DEVICES to 0,1,2,3 inside the step; GPU i sits on NUMA 3-i,
+    # while local rank i is bound to NUMA i, so reverse here (upstream's mapping).
+    export CUDA_VISIBLE_DEVICES=3,2,1,0
     export WANDB_CACHE_DIR='${WANDB_CACHE_DIR}'
     cd '${SCRIPT_DIR}'
     python scripts/launch_train.py --config '${TRAIN_CONFIG}'

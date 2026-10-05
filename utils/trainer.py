@@ -181,6 +181,7 @@ class Trainer:
         )
 
         # Job-chain resume: ignore branch_from/finetune_from and load highest iter ckpt.
+        # If this run has no checkpoint yet, fall through so a first cooldown job still branches.
         if load_highest:
             highest = self._find_highest_iter_checkpoint()
             if highest is None:
@@ -201,17 +202,16 @@ class Trainer:
                     restore_scheduler=True,
                     restore_dataset=True,
                 )
-            else:
-                src = (
-                    "LOAD_HIGHEST_CHECKPOINT env"
-                    if env_force
-                    else "train.load_highest_checkpoint=true"
-                )
-                logging.info(
-                    "%s but no checkpoints found in %s; starting from scratch"
-                    % (src, os.path.join(self.exp_dir, "checkpoints"))
-                )
-            return
+                return
+            src = (
+                "LOAD_HIGHEST_CHECKPOINT env"
+                if env_force
+                else "train.load_highest_checkpoint=true"
+            )
+            logging.info(
+                "%s but no checkpoints found in %s; falling back to branch_from/finetune_from/scratch"
+                % (src, os.path.join(self.exp_dir, "checkpoints"))
+            )
 
         self.resuming = (
             True if os.path.isfile(self.checkpoint_path) and self.auto_resume else False

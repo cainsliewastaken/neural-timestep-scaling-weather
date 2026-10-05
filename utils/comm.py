@@ -1,11 +1,16 @@
 import os
 import logging
+from datetime import timedelta
 from utils.rank_generator import RankGenerator
 import torch
 import torch.distributed as dist
 
 # dummy placeholder
 _COMM_GROUPS = {}
+
+# Collective timeout for all process groups. Full-year validation takes 20-60 min and DP groups
+# finish it at different times, so the 10 min NCCL default kills runs at the post-validation barrier.
+_PG_TIMEOUT = timedelta(minutes=int(os.getenv("PG_TIMEOUT_MINUTES", "60")))
 
 # routines for specific comm groups
 def get_names():
@@ -123,7 +128,7 @@ def init_process_group(backend):
     else:
         world_size = int(os.getenv("SLURM_NTASKS", 1))
         world_rank = int(os.getenv("SLURM_PROCID", 0))
-    dist.init_process_group(backend=backend, rank=world_rank, world_size=world_size)
+    dist.init_process_group(backend=backend, rank=world_rank, world_size=world_size, timeout=_PG_TIMEOUT)
 
 def init_model_parallel_info(tp=1, pp=1, dp=1, sp1=1, sp2=1, order="sp1-sp2-tp-pp-dp"):
     world_rank = get_world_rank()
@@ -143,7 +148,7 @@ def init_model_parallel_info(tp=1, pp=1, dp=1, sp1=1, sp2=1, order="sp1-sp2-tp-p
     groups_to_build = ["dp", "tp", "sp1", "sp2", "sp1-sp2", "pp", "tp-sp1-sp2", "dp-sp1-sp2"]
     for grp in groups_to_build:
         for ranks in rank_gen.get_ranks(grp):
-            group = dist.new_group(ranks)
+            group = dist.new_group(ranks, timeout=_PG_TIMEOUT)
             if world_rank in ranks:
                 _COMM_GROUPS[grp] = group
 
