@@ -1,0 +1,84 @@
+schema_version: 1
+run_name: era5_isoflop
+run_tag: 3T_dt12p0_e416_d5
+metadata:
+  budget_label: 3T
+  target_rollout_flops: 3000000000000.0
+  train_final_time_hours: 24.0
+  base_dt_hours: 1.0
+  model_dt_hours: 12.0
+  rollout_steps: 2
+  reference_dt_scale: 1.0
+  expected_total_train_flops: 2.9952e+18
+  expected_total_inference_flops: 3000000000000.0
+  dt_scale: 12.0
+  embed_dim: 416
+  depth: 5
+  num_heads: 13
+  aspect_ratio: 83.2
+  min_aspect_ratio: 40.0
+  max_aspect_ratio: 100.0
+  target_aspect_ratio: 80.0
+  aspect_tolerance: 0.35
+  flop_tolerance: 0.05
+  monotonic_budgets:
+  - 3000000000000.0
+  - 6000000000000.0
+  - 9000000000000.0
+  - 12000000000000.0
+  - 15000000000000.0
+  - 18000000000000.0
+  aspect_rel_err: 0.0
+  flop_rel_err: 0.04810846399999951
+  patch_size: 4
+  window_size:
+  - 9
+  - 18
+  forward_flops: 1572162695999.9995
+  forward_flops_count_grid: 98260168499.99997
+  rollout_budget: 3144325391999.9985
+  train_flops_per_iteration: 150927618815999.94
+  max_iterations: 19845
+  total_train_flops: 2.995158595403519e+18
+  n_train_samples: 333096
+  epochs: 0.9532387059586426
+  total_inference_flops: 3144325391999.999
+  num_parameters: 11384255
+  grid:
+  - 720
+  - 1440
+  flop_count_grid:
+  - 180
+  - 360
+  flop_backend: analytical
+slurm:
+  nodes: 2
+  gpus_per_node: 4
+hydra_overrides:
+  run_name: era5_isoflop
+  run_tag: 3T_dt12p0_e416_d5
+  data.dt_scale: 12
+  data.batch_size: 16
+  model.embed_dim: 416
+  model.depth: 5
+  model.num_heads: 13
+  model.patch_size: 4
+  model.window_size:
+  - 9
+  - 18
+  parallelism.sp1: 2
+  parallelism.sp2: 1
+  parallelism.micro_batch_size: 1
+  parallelism.use_transformer_engine: true
+  optimizer: adamw
+  optimizer.lr: 0.0005
+  train.clip_grad_norm: 1.0
+  optimizer.max_iterations: 19845
+  train.temporal_context_window: 1
+  train.num_rollout_steps: 2
+  train.rollout_activation_checkpointing: true
+  model.step_method: euler
+  model.time_unit_hours: 8.0
+  model.tendency_stats: /registry/stats/tendency_stats_v1.0.h5
+  inference.time_horizon_in_hours: 24.0
+  data.read_local: true

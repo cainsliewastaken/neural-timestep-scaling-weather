@@ -1,0 +1,92 @@
+schema_version: 1
+run_name: era5_isoflop
+run_tag: 3T_dt4p0_e288_d3
+metadata:
+  budget_label: 3T
+  target_rollout_flops: 3000000000000.0
+  train_final_time_hours: 24.0
+  base_dt_hours: 1.0
+  model_dt_hours: 4.0
+  rollout_steps: 6
+  reference_dt_scale: 1.0
+  expected_total_train_flops: 2.9952e+18
+  expected_total_inference_flops: 3000000000000.0
+  dt_scale: 4.0
+  embed_dim: 288
+  depth: 3
+  num_heads: 9
+  aspect_ratio: 96.0
+  min_aspect_ratio: 40.0
+  max_aspect_ratio: 100.0
+  target_aspect_ratio: 80.0
+  aspect_tolerance: 0.35
+  flop_tolerance: 0.05
+  monotonic_budgets:
+  - 3000000000000.0
+  - 6000000000000.0
+  - 9000000000000.0
+  - 12000000000000.0
+  - 15000000000000.0
+  - 18000000000000.0
+  aspect_rel_err: 0.0
+  flop_rel_err: 0.03333475520000016
+  patch_size: 4
+  window_size:
+  - 9
+  - 18
+  forward_flops: 516667377600.00006
+  forward_flops_count_grid: 32291711100.000004
+  rollout_budget: 3100004265600.0005
+  train_flops_per_iteration: 148800204748800.03
+  max_iterations: 20129
+  total_train_flops: 2.9951993213885957e+18
+  n_train_samples: 333096
+  epochs: 0.9668804188582271
+  total_inference_flops: 3100004265600.0005
+  num_parameters: 3676608
+  grid:
+  - 720
+  - 1440
+  flop_count_grid:
+  - 180
+  - 360
+  flop_backend: analytical
+  lr_phase: cooldown (1-sqrt)
+  cooldown_from_iter: 19123
+  total_iterations: 20129
+slurm:
+  nodes: 2
+  gpus_per_node: 4
+hydra_overrides:
+  run_name: era5_isoflop_v2
+  run_tag: 3T_dt4p0_e288_d3-cool
+  data.dt_scale: 4
+  data.batch_size: 16
+  model.embed_dim: 288
+  model.depth: 3
+  model.num_heads: 9
+  model.patch_size: 4
+  model.window_size:
+  - 9
+  - 18
+  parallelism.sp1: 2
+  parallelism.sp2: 1
+  parallelism.micro_batch_size: 1
+  parallelism.use_transformer_engine: true
+  optimizer: adamw
+  optimizer.lr: 0.0005
+  train.clip_grad_norm: 1.0
+  optimizer.max_iterations: 20129
+  train.temporal_context_window: 1
+  train.num_rollout_steps: 6
+  train.rollout_activation_checkpointing: true
+  model.step_method: euler
+  model.time_unit_hours: 8.0
+  model.tendency_stats: /registry/stats/tendency_stats_v1.0.h5
+  inference.time_horizon_in_hours: 24.0
+  data.read_local: true
+  train.branch_from: /expts/era5_isoflop_v2/3T_dt4p0_e288_d3/checkpoints/ckpt_iter19123.tar
+  optimizer.scheduler: cooldown
+  optimizer.cooldown_from_iter: 19123
+  optimizer.cooldown_to_iter: 20129
+  optimizer.cooldown_fraction: 0.05
