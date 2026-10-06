@@ -528,6 +528,12 @@ class Era5HDF5DatasetDALI:
                 arr = ds_handle["data"][t_sel, :, :, :]
                 buf[i:j_end] = arr[..., lat_slice, lon_slice]
 
+            # Samples are drawn at random from multi-TB files and never re-read, so drop them
+            # from the page cache: otherwise the cache fills the job's memory limit and every
+            # allocation in the loader workers stalls in direct reclaim.
+            if os.environ.get("ERA5_FADVISE_DONTNEED", "1") == "1":
+                os.posix_fadvise(ds_handle.id.get_vfd_handle(), 0, 0, os.POSIX_FADV_DONTNEED)
+
             i = j_end
 
     def __call__(self, sample_info):
