@@ -163,8 +163,10 @@ class Trainer:
         for c in (prevcfg, curcfg):
             c.get("data", {}).pop("num_data_workers", None)
             c.get("data", {}).pop("num_val_workers", None)
-            # Checkpoint frequency only decides when state is written, not how training proceeds.
+            # Checkpoint and validation frequency only decide when state is written and when the
+            # (training-independent) validation loss is measured, not how training proceeds.
             c.get("train", {}).pop("checkpoint_every", None)
+            c.get("train", {}).pop("log_every", None)
         assert prevcfg == curcfg, (
             "Resuming run_name=%s, run_tag=%s failed: config saved to hyperparameters.yaml does not match current config"
             % (self.cfg.run_name, self.cfg.run_tag)
