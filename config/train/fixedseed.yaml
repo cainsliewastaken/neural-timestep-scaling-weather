@@ -12,6 +12,9 @@ branch_from: null # use to specify path to a checkpoint you want to branch from
 # If true, ignore branch_from/finetune_from and load the highest checkpoints/ckpt*_iterN.tar
 # (job-chain resume after walltime). Default false.
 load_highest_checkpoint: false
+# Save a checkpoint (no validation) every N optimizer iterations, in addition to the
+# log_every validate+checkpoint; null = only at log_every. Limits work lost at walltime.
+checkpoint_every: null
 temporal_context_window: 1
 num_rollout_steps: 1
 # recompute each rollout step in backward (saves activation memory for long rollouts)

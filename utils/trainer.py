@@ -163,6 +163,8 @@ class Trainer:
         for c in (prevcfg, curcfg):
             c.get("data", {}).pop("num_data_workers", None)
             c.get("data", {}).pop("num_val_workers", None)
+            # Checkpoint frequency only decides when state is written, not how training proceeds.
+            c.get("train", {}).pop("checkpoint_every", None)
         assert prevcfg == curcfg, (
             "Resuming run_name=%s, run_tag=%s failed: config saved to hyperparameters.yaml does not match current config"
             % (self.cfg.run_name, self.cfg.run_tag)
@@ -713,6 +715,17 @@ class Trainer:
                     self.train_loss.zero_()
                     self.grad.zero_()
                     self.train_time = time.time()  # start timing and go back to training
+
+                # extra checkpoints between validations (same state as validate_and_checkpoint saves)
+                ckpt_every = OmegaConf.select(self.cfg, "train.checkpoint_every", default=None)
+                if (
+                    ckpt_every
+                    and self.cfg.train.save_checkpoint
+                    and self.iters % ckpt_every == 0
+                    and self.iters % self.log_every != 0
+                    and self.iters < self.max_iters
+                ):
+                    self.save_checkpoint(self.checkpoint_path, is_best=False)
 
                 # save ckpts at the begining of cooldown in case we need to change the loss later
                 if self.cfg.optimizer.scheduler == "cooldown":
