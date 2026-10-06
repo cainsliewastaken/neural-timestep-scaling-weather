@@ -121,10 +121,16 @@ def get_data_loader(cfg, dataset, mode="train"):
         )
     elif cfg.data.loader == "dali":
         # use DALI dataloader: builds pipeline etc.
+        # The validation loader idles between validations, so it may use fewer workers
+        # (and shared-memory buffers) than training. Worker counts never change sample order.
+        num_workers = cfg.data.num_data_workers
+        val_workers = cfg.data.get("num_val_workers", None)
+        if mode in ("valid", "test") and val_workers is not None:
+            num_workers = val_workers
         dataloader = ERA5HDF5DALIDataLoader(
             dataset=dataset,
             micro_batch_size=cfg.parallelism.micro_batch_size,
-            num_data_workers=cfg.data.num_data_workers,
+            num_data_workers=num_workers,
             mode=mode,
             seed=42,
         )

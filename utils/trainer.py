@@ -156,10 +156,14 @@ class Trainer:
         prev_path = os.path.join(self.exp_dir, "hyperparameters.yaml")
         if not os.path.isfile(prev_path):
             return
-        prevcfg = OmegaConf.load(prev_path)
-        assert OmegaConf.to_container(
-            prevcfg, resolve=True
-        ) == OmegaConf.to_container(self.cfg, resolve=True), (
+        prevcfg = OmegaConf.to_container(OmegaConf.load(prev_path), resolve=True)
+        curcfg = OmegaConf.to_container(self.cfg, resolve=True)
+        # Loader worker counts only change how many processes read samples, not which samples
+        # or their order, so a resumed run may change them.
+        for c in (prevcfg, curcfg):
+            c.get("data", {}).pop("num_data_workers", None)
+            c.get("data", {}).pop("num_val_workers", None)
+        assert prevcfg == curcfg, (
             "Resuming run_name=%s, run_tag=%s failed: config saved to hyperparameters.yaml does not match current config"
             % (self.cfg.run_name, self.cfg.run_tag)
         )

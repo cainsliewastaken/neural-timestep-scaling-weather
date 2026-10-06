@@ -16,6 +16,7 @@ batch_size: 64
 limit_nsamples: -1 # -1 for full data set, otherwise limit to first N samples
 limit_nsamples_val: -1 # -1 for full data set, otherwise limit to first N samples: validation set
 num_data_workers: 2
+num_val_workers: null # workers for the valid/test loaders; null = same as num_data_workers
 track_channels: ['u10m','v10m','t2m','tcwv']
 valid_years:
     - 2017
